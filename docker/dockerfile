@@ -1,0 +1,33 @@
+# Stage 1: Build and prepare KeyDB with data
+FROM eqalpha/keydb:latest as builder
+
+# Set working directory
+WORKDIR /data
+
+# Copy your MessagePack file into the container
+COPY kv_data.msgpack /data/kv_data.msgpack
+
+# Copy a script to load data into KeyDB
+COPY load_msgpack.py /scripts/load_msgpack.py
+
+# Start KeyDB, load data, and save state
+RUN apt-get update && apt-get install -y python3 python3-pip && \
+  pip3 install redis msgpack && \
+  keydb-server --save "" --daemonize yes && \
+  sleep 2 && \
+  python3 /scripts/load_msgpack.py && \
+  redis-cli SAVE && \
+  pkill keydb-server
+
+# At this point, KeyDB saves its state in /data/dump.rdb
+# We ensure the RDB file is part of the builder stage
+RUN ls /data/dump.rdb
+
+# Stage 2: Final image
+FROM eqalpha/keydb:latest
+
+# Copy the KeyDB state from the builder stage
+COPY --from=builder /data/dump.rdb /data/dump.rdb
+
+# Start KeyDB and configure it to load the pre-saved state
+CMD ["keydb-server", "--dir", "/data", "--dbfilename", "dump.rdb"]
