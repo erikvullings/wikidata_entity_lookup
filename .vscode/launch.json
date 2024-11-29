@@ -21,7 +21,7 @@
       },
       "args": [
         "/d/data/wikidata/latest-all.json",
-        "-e person,organisation",
+        // "-e person,organization",
         "-o ./output",
         "-f JSONLines"
       ],
