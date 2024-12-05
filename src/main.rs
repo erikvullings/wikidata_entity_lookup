@@ -9,7 +9,7 @@ use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, REFERER, USER_AGENT,
 };
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::{BufRead, BufReader, Write};
@@ -36,6 +36,7 @@ struct WikidataEntity {
     id: String,
     labels: Option<Map<String, Value>>,
     descriptions: Option<Map<String, Value>>,
+    aliases: Option<Map<String, Value>>,
 }
 
 fn get_entity_type_mappings() -> HashMap<&'static str, &'static str> {
@@ -46,10 +47,7 @@ fn get_entity_type_mappings() -> HashMap<&'static str, &'static str> {
         ("scientific_organization", "Q16519632"),
         ("research_institute", "Q31855"),
         ("government_agency", "Q327333"),
-        ("association ", "Q15911314"),
-        ("location", "Q17334923"),
         ("event", "Q1656682"),
-        ("creative_work", "Q17537576"),
     ])
 }
 
@@ -88,17 +86,6 @@ fn get_default_properties() -> HashMap<&'static str, Vec<&'static str>> {
         ("scientific_organization", organization_props.clone()),
         ("research_institute", organization_props.clone()),
         ("government_agency", organization_props.clone()),
-        ("association", organization_props.clone()),
-        (
-            // Location-related properties
-            "location",
-            vec![
-                "P625", // Coordinates
-                "P17",  // Country
-                "P18",  // Image
-                "P421", // Time zone
-            ],
-        ),
         (
             // Event-related properties
             "event",
@@ -107,17 +94,6 @@ fn get_default_properties() -> HashMap<&'static str, Vec<&'static str>> {
                 "P17",  // Country
                 "P276", // Location
                 "P31",  // Instance of
-                "P18",  // Image
-            ],
-        ),
-        (
-            // Creative work-related properties
-            "creative_work",
-            vec![
-                "P50",  // Author
-                "P577", // Publication date
-                "P136", // Genre
-                "P921", // Main subject
                 "P18",  // Image
             ],
         ),
@@ -509,10 +485,19 @@ fn process_wikidata(input_path: &str, config: Config) -> Result<(), ProcessingEr
             };
 
             // Process entity
-            if let (Some(claims), Some(labels), Some(descriptions)) =
-                (entity.claims, entity.labels, entity.descriptions)
-            {
+            if let (Some(claims), Some(labels), Some(descriptions), Some(aliases)) = (
+                entity.claims,
+                entity.labels,
+                entity.descriptions,
+                entity.aliases,
+            ) {
                 let description = descriptions
+                    .get(&config.lang)
+                    // .or(descriptions.get("en"))
+                    .and_then(|obj| obj.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let aliases = aliases
                     .get(&config.lang)
                     .and_then(|obj| obj.get("value"))
                     .and_then(|v| v.as_str())
@@ -539,6 +524,7 @@ fn process_wikidata(input_path: &str, config: Config) -> Result<(), ProcessingEr
                                         &entity.id,
                                         label,
                                         description,
+                                        aliases,
                                         &claims,
                                         &config,
                                         &default_properties,
@@ -654,6 +640,7 @@ fn write_entity_data(
     entity_id: &str,
     label: &str,
     description: &str,
+    aliases: &str,
     claims: &Map<String, Value>,
     config: &Config,
     default_properties: &HashMap<&str, Vec<&str>>,
@@ -666,37 +653,64 @@ fn write_entity_data(
         default_properties,
     ));
 
-    // Write to CSV
-    batched_writer.add_csv_entry(
-        entity_type.to_string(),
-        (label.to_string(), entity_id.to_string()),
-    )?;
-
-    if let Some(short_name) = properties.get("P1813") {
+    if !label.is_empty() {
+        // Write to CSV
         batched_writer.add_csv_entry(
             entity_type.to_string(),
-            (short_name.to_string(), entity_id.to_string()),
+            (label.to_string(), entity_id.to_string()),
         )?;
-    }
 
-    if let Some(nickname) = properties.get("P1449") {
-        batched_writer.add_csv_entry(
-            entity_type.to_string(),
-            (nickname.to_string(), entity_id.to_string()),
-        )?;
-    }
-
-    // Prepare KV entry
-    let kv_entry = serde_json::json!({
-        entity_id: {
-            "label": label,
-            "description": description,
-            "properties": Value::Object(properties)
+        if let Some(short_name_val) = properties.get("P1813") {
+            if let Some(short_name) = short_name_val.as_str() {
+                batched_writer.add_csv_entry(
+                    entity_type.to_string(),
+                    (short_name.to_string(), entity_id.to_string()),
+                )?;
+            }
         }
-    });
 
-    // Add to batch
-    batched_writer.add_kv_entry(kv_entry)?;
+        if let Some(nickname_val) = properties.get("P1449") {
+            if let Some(nickname) = nickname_val.as_str() {
+                batched_writer.add_csv_entry(
+                    entity_type.to_string(),
+                    (nickname.to_string(), entity_id.to_string()),
+                )?;
+            }
+        }
+
+        if !aliases.is_empty() {
+            batched_writer.add_csv_entry(
+                entity_type.to_string(),
+                (aliases.to_string(), entity_id.to_string()),
+            )?;
+        }
+
+        // Prepare KV entry
+        let mut entity_data = serde_json::Map::new();
+        entity_data.insert("label".to_string(), json!(label));
+
+        // Conditionally add description if not empty
+        if !description.is_empty() {
+            entity_data.insert("descr".to_string(), json!(description));
+        }
+
+        // Conditionally add aliases if not empty
+        if !aliases.is_empty() {
+            entity_data.insert("alias".to_string(), json!(aliases));
+        }
+
+        // Always add properties
+        if properties.len() > 0 {
+            entity_data.insert("props".to_string(), json!(properties));
+        }
+
+        let kv_entry = json!({
+            entity_id: entity_data
+        });
+
+        // Add to batch
+        batched_writer.add_kv_entry(kv_entry)?;
+    }
 
     Ok(())
 }
@@ -754,18 +768,22 @@ fn extract_properties(
                                 .and_then(|ms| ms.get("datavalue"))
                                 .and_then(|dv| dv.get("value"))
                                 .and_then(|v| v.as_str())
-                                .and_then(|v| create_image_thumbnail_url(v, None))
                             {
                                 if process_images {
-                                    if let Ok(base64_image) = fetch_base64_image(commons_url) {
-                                        properties.insert(
-                                            "image".to_string(),
-                                            Value::String(base64_image),
-                                        );
+                                    if let Some(url) = create_image_thumbnail_url(commons_url, None)
+                                    {
+                                        if let Ok(base64_image) = fetch_base64_image(url) {
+                                            properties.insert(
+                                                "image".to_string(),
+                                                Value::String(base64_image),
+                                            );
+                                        }
                                     }
                                 } else {
-                                    properties
-                                        .insert("image".to_string(), Value::String(commons_url));
+                                    properties.insert(
+                                        "image".to_string(),
+                                        Value::String(commons_url.to_string()),
+                                    );
                                 }
                             }
                         }
