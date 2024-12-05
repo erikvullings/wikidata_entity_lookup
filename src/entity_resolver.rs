@@ -110,17 +110,27 @@ impl EntityResolver {
             self.fetch_and_cache_entities(&ids_to_resolve, &self.api_base_url);
         }
 
+        let mut keys_to_remove = Vec::new();
         // Replace IDs with labels
-        for (_, value) in properties.iter_mut() {
+        for (key, value) in properties.iter_mut() {
             if let Some(full_id) = value.as_str() {
                 let base_id = full_id.split('$').next().unwrap_or(full_id);
 
                 if let Some(label) = self.get_cached_label(base_id) {
-                    *value = Value::String(label);
+                    if !label.is_empty() {
+                        *value = Value::String(label);
+                    } else {
+                        // Remove the property if the label is empty
+                        keys_to_remove.push(key.clone());
+                    }
                 }
             }
         }
 
+        // Remove keys after the loop
+        for key in keys_to_remove {
+            properties.remove(&key);
+        }
         properties
     }
 
@@ -154,7 +164,10 @@ impl EntityResolver {
                 let mut labels_to_cache = HashMap::new();
 
                 for (id, entity) in entities {
-                    if let Some(label) = entity["labels"]["en"]["value"].as_str() {
+                    if let Some(label) = entity["labels"]["en"]["value"]
+                        .as_str()
+                        .or(entity["labels"]["nl"]["value"].as_str().or(Some("")))
+                    {
                         labels_to_cache.insert(id.clone(), label.to_string());
                     }
                 }
