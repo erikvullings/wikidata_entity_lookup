@@ -27,8 +27,16 @@ Unzip the data to `latest-all.json` using 7zip or some efficient unzipper that s
 
 ## Run
 
+Using English as the main language:
+
 ```bash
-cargo run --release -- /d/data/wikidata/latest-all.json -e person,organisation,scientific_organization,research_institute,government_agency,association,location,event -o ./output -f JSONLines
+cargo run --release -- /d/data/wikidata/latest-all.json -o ./output
+```
+
+Alternatively, specify the language, e.g. using Dutch:
+
+```bash
+cargo run --release -- /d/data/wikidata/latest-all.json -l nl -o ./output
 ```
 
 ## Host the data online
