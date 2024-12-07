@@ -8,6 +8,7 @@ For OSINT and PII (Personal Identifiable Information) analysis, it is practical 
 Thus the pipeline would be as follows: An extracted article would be processed using NER (Named Entity Recognition). Each relevant person, location, etc. would be checked if it is present in the extracted Wikidata data. If so, the article is not only enhanced with the NER, but also with the Wikidata ID. The OSINT analyst can, when reading the article, use the Wikidata ID to retrieve the Wikidata data to enhance his information and understanding.
 
 Therefore, this repository:
+
 1. Extracts entities of interest from Wikidata and saves them to JSON Lines or MessagePack format.
 2. Stores the names, short names and nicknames in a CSV: This file can be used for PII, or to enhance extracted named entities with their entity ID.
 3. Extract additional properties for the main entities that are stores: uses online service to resolve them (saved in `output/entity_cache.csv`);
@@ -37,6 +38,12 @@ Alternatively, specify the language, e.g. using Dutch:
 
 ```bash
 cargo run --release -- /d/data/wikidata/latest-all.json -l nl -o ./output
+```
+
+Alternatively, on Windows:
+
+```ps1
+cargo run --release D:\data\wikidata\latest-all.json -l nl -o output
 ```
 
 ## Host the data online

@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ fn process_wikidata(input_path: String, config: Config) -> Result<(), Processing
 
     // Create a batched writer
     let batched_writer =
-        BatchedWriter::new(csv_writers, kv_file, config.output_format.clone(), 50000);
+        BatchedWriter::new(csv_writers, kv_file, config.output_format.clone(), 10000);
     let batched_writer = Arc::new(Mutex::new(batched_writer));
 
     // Open input file and get total file size for progress tracking
@@ -232,30 +232,31 @@ fn process_wikidata(input_path: String, config: Config) -> Result<(), Processing
                 entity.descriptions,
                 entity.aliases,
             ) {
-                let description = descriptions
-                    .get(&config.lang)
-                    // .or(descriptions.get("en"))
-                    .and_then(|obj| obj.get("value"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let aliases = aliases
-                    .get(&config.lang)
-                    .and_then(|value| value.as_array())
-                    .and_then(|values| {
-                        // dbg!(&values);
-                        Some(
-                            values
-                                .iter()
-                                .map(|v| v.get("value").and_then(|v| v.as_str()).unwrap_or(""))
-                                .collect::<Vec<&str>>(), // .join(";"),
-                        )
-                    })
-                    .unwrap_or(Vec::new());
-                // if !aliases.is_empty() {
-                //     dbg!(&aliases);
-                // }
                 if let Some(label_obj) = labels.get(&config.lang) {
                     if let Some(label) = label_obj.get("value").and_then(|v| v.as_str()) {
+                        let description = descriptions
+                            .get(&config.lang)
+                            // .or(descriptions.get("en"))
+                            .and_then(|obj| obj.get("value"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let aliases = aliases
+                            .get(&config.lang)
+                            .and_then(|value| value.as_array())
+                            .and_then(|values| {
+                                // dbg!(&values);
+                                Some(
+                                    values
+                                        .iter()
+                                        .map(|v| {
+                                            v.get("value").and_then(|v| v.as_str()).unwrap_or("")
+                                        })
+                                        .filter(|alias| *alias != label)
+                                        .collect::<Vec<&str>>(),
+                                )
+                            })
+                            .unwrap_or(Vec::new());
+
                         for entity_type in &config.entity_types {
                             if let Some(instance_of) = entity_mappings.get(entity_type.as_str()) {
                                 if claims.get("P31").and_then(|p31| p31.as_array()).map_or(
@@ -272,19 +273,26 @@ fn process_wikidata(input_path: String, config: Config) -> Result<(), Processing
                                         })
                                     },
                                 ) {
-                                    // Batch the writes
-                                    let mut writer = batched_writer.lock().unwrap();
-                                    write_entity_data(
+                                    let (used_names, kv_entry) = prepare_data_export(
                                         &resolver,
-                                        &mut writer,
                                         entity_type,
                                         &entity.id,
-                                        label,
-                                        description,
-                                        &aliases,
                                         &claims,
                                         &config,
                                         &default_properties,
+                                        label,
+                                        &aliases,
+                                        description,
+                                    );
+
+                                    // Batch the writes
+                                    let mut writer = batched_writer.lock().unwrap();
+                                    write_entity_data(
+                                        &mut writer,
+                                        entity_type,
+                                        &entity.id,
+                                        used_names,
+                                        kv_entry,
                                     )?;
                                 }
                             }
@@ -300,92 +308,88 @@ fn process_wikidata(input_path: String, config: Config) -> Result<(), Processing
     batched_writer.lock().unwrap().finalize()?;
 
     // Clear progress line
-    println!("\rProcessing: 100% | Completed                        ");
+    println!(
+        "\rProcessing: 100% | Completed in {:.0}s                 ",
+        start_time.elapsed().as_secs()
+    );
 
     Ok(())
 }
 
-fn write_entity_data(
+/// Prepare the data for export
+fn prepare_data_export(
     resolver: &EntityResolver,
-    batched_writer: &mut BatchedWriter,
-    entity_type: &str,
+    entity_type: &String,
     entity_id: &str,
-    label: &str,
-    description: &str,
-    aliases: &Vec<&str>,
     claims: &Map<String, Value>,
     config: &Config,
     default_properties: &HashMap<&str, Vec<&str>>,
-) -> Result<(), ProcessingError> {
-    // Extract properties
-    let properties = resolver.resolve_entity_ids(extract_properties(
+    label: &str,
+    aliases: &Vec<&str>,
+    description: &str,
+) -> (HashSet<String>, Value) {
+    let properties = &resolver.resolve_entity_ids(extract_properties(
         entity_type,
         &Value::Object(claims.clone()),
         config.process_images,
         default_properties,
     ));
 
-    if !label.is_empty() {
-        // Write to CSV
-        batched_writer.add_csv_entry(
-            entity_type.to_string(),
-            (label.to_string(), entity_id.to_string()),
-        )?;
+    let mut used_names = HashSet::with_capacity(6);
+    used_names.insert(label.to_string());
 
-        if let Some(short_name_val) = properties.get("P1813") {
-            if let Some(short_name) = short_name_val.as_str() {
-                batched_writer.add_csv_entry(
-                    entity_type.to_string(),
-                    (short_name.to_string(), entity_id.to_string()),
-                )?;
+    for key in ["P1813" /* Short name */, "P1449" /* Nickname */] {
+        if let Some(alt_name_val) = properties.get(key) {
+            if let Some(alt_name) = alt_name_val.as_str() {
+                used_names.insert(alt_name.to_string());
             }
         }
-
-        if let Some(nickname_val) = properties.get("P1449") {
-            if let Some(nickname) = nickname_val.as_str() {
-                batched_writer.add_csv_entry(
-                    entity_type.to_string(),
-                    (nickname.to_string(), entity_id.to_string()),
-                )?;
-            }
-        }
-
-        if !aliases.is_empty() {
-            for alias in aliases {
-                batched_writer.add_csv_entry(
-                    entity_type.to_string(),
-                    (alias.to_string(), entity_id.to_string()),
-                )?;
-            }
-        }
-
-        // Prepare KV entry
-        let mut entity_data = serde_json::Map::new();
-        entity_data.insert("label".to_string(), json!(label));
-
-        // Conditionally add description if not empty
-        if !description.is_empty() {
-            entity_data.insert("descr".to_string(), json!(description));
-        }
-
-        // Conditionally add aliases if not empty
-        if !aliases.is_empty() {
-            entity_data.insert("alias".to_string(), json!(aliases));
-        }
-
-        // Always add properties
-        if properties.len() > 0 {
-            entity_data.insert("props".to_string(), json!(properties));
-        }
-
-        let kv_entry = json!({
-            entity_id: entity_data
-        });
-
-        // Add to batch
-        batched_writer.add_kv_entry(kv_entry)?;
     }
 
+    for alias in aliases {
+        if !used_names.contains(*alias) {
+            used_names.insert(alias.to_string());
+        }
+    }
+
+    let mut entity_data = serde_json::Map::new();
+    entity_data.insert("label".to_string(), json!(label));
+
+    // Conditionally add description if not empty
+    if !description.is_empty() {
+        entity_data.insert("descr".to_string(), json!(description));
+    }
+
+    // Conditionally add aliases if not empty
+    if !aliases.is_empty() {
+        entity_data.insert("alias".to_string(), json!(aliases));
+    }
+
+    // Always add properties
+    if properties.len() > 0 {
+        entity_data.insert("props".to_string(), json!(properties));
+    }
+
+    let kv_entry = json!({
+        entity_id: entity_data
+    });
+    (used_names, kv_entry)
+}
+
+fn write_entity_data(
+    batched_writer: &mut BatchedWriter,
+    entity_type: &str,
+    entity_id: &str,
+    used_names: HashSet<String>,
+    kv_entry: Value,
+) -> Result<(), ProcessingError> {
+    for used_name in used_names {
+        batched_writer.add_csv_entry(
+            entity_type.to_string(),
+            (used_name.to_string(), entity_id.to_string()),
+        )?;
+    }
+    batched_writer.add_kv_entry(kv_entry)?;
     Ok(())
 }
 
