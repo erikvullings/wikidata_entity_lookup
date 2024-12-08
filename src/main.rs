@@ -126,6 +126,7 @@ fn process_wikidata(input_path: String, config: Config) -> Result<(), Processing
     let resolver = EntityResolver::new(
         PathBuf::from(format!("{}/entity_cache.csv", config.output_dir)),
         "https://www.wikidata.org/w/api.php".to_string(),
+        &config.lang,
     );
 
     // Initialize CSV writers

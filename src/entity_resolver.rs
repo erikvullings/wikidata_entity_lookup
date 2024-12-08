@@ -58,15 +58,26 @@ pub struct EntityResolver {
     cache: Arc<RwLock<EntityCache>>,
     cache_file_path: PathBuf,
     save_counter: Arc<Mutex<usize>>,
+    /// Wikibase API url
     api_base_url: String,
+    /// Required language
+    language: String,
+    /// Required language including English in case the required language is not English
+    languages: String,
 }
 
 impl EntityResolver {
-    pub fn new(cache_file_path: PathBuf, api_base_url: String) -> Self {
+    pub fn new(cache_file_path: PathBuf, api_base_url: String, language: &str) -> Self {
         // Try to load existing cache, or create a new one
         let cache = match EntityCache::load_from_csv(&cache_file_path) {
             Ok(loaded_cache) => Arc::new(RwLock::new(loaded_cache)),
             Err(_) => Arc::new(RwLock::new(EntityCache::new())),
+        };
+
+        let languages = if language == "en" {
+            "en".to_string()
+        } else {
+            format!("{},en", language)
         };
 
         Self {
@@ -74,6 +85,8 @@ impl EntityResolver {
             cache_file_path,
             save_counter: Arc::new(Mutex::new(0)),
             api_base_url,
+            language: language.to_string(),
+            languages,
         }
     }
 
@@ -152,7 +165,7 @@ impl EntityResolver {
                     ("format", "json"),
                     ("ids", &ids_param),
                     ("props", "labels"),
-                    ("languages", "en"),
+                    ("languages", &self.languages),
                 ])
                 .send()
                 .expect("Failed to send request");
@@ -164,9 +177,9 @@ impl EntityResolver {
                 let mut labels_to_cache = HashMap::new();
 
                 for (id, entity) in entities {
-                    if let Some(label) = entity["labels"]["en"]["value"]
+                    if let Some(label) = entity["labels"][&self.language]["value"]
                         .as_str()
-                        .or(entity["labels"]["nl"]["value"].as_str().or(Some("")))
+                        .or(entity["labels"]["en"]["value"].as_str().or(Some("")))
                     {
                         labels_to_cache.insert(id.clone(), label.to_string());
                     }
